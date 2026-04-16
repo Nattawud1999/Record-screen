@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Screen Monitor Launcher - launch recorder for every active user session</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- รันทันทีที่ Windows บูท -->
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT30S</Delay>
+    </BootTrigger>
+    <!-- รันซ้ำทุก 1 นาทีตลอดเวลา -->
+    <TimeTrigger>
+      <StartBoundary>2000-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <!-- รันเป็น SYSTEM เพื่อให้ใช้ WTSQueryUserToken ได้ -->
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>C:\ProgramData\ScreenMonitor\launcher.exe</Command>
+    </Exec>
+  </Actions>
+</Task>

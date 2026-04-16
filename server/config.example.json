@@ -1,0 +1,10 @@
+{
+    "storage_path": "D:",
+    "auto_delete_enabled": false,
+    "auto_delete_days": 30,
+    "client_config": {
+        "recording_active": true,
+        "screenshot_interval_seconds": 5,
+        "quality": 80
+    }
+}

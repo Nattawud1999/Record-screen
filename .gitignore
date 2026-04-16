@@ -1,0 +1,28 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Config with real data (use config.example.json instead)
+config.json
+
+# Compiled executables
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
