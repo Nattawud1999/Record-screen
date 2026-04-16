@@ -255,4 +255,4 @@ storage_path/
 
 ## 📝 License
 
-MIT License
+Nattawut License
