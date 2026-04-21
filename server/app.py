@@ -19,6 +19,35 @@ client_heartbeats = {}
 # Pending commands: { "hostname/username": "uninstall" }
 pending_commands = {}
 
+# ── Performance caches ──────────────────────────────────────────────────────
+_latest_cache    = {'data': None, 'ts': 0}   # /api/latest   TTL 10 s
+_computers_cache = {'data': None, 'ts': 0}   # /api/computers TTL 30 s
+LATEST_TTL    = 10
+COMPUTERS_TTL = 30
+
+def _ts_from_filename(name):
+    """Extract unix timestamp from 'capture_1776332742.jpg' → fast, no syscall."""
+    try:
+        return int(name.split('_')[1].split('.')[0])
+    except Exception:
+        return None
+
+def _scan_user_dir(user_dir):
+    """Return (latest_name, all_names_sorted_asc) for image files in user_dir.
+    Uses filename timestamp — no per-file mtime syscall."""
+    try:
+        names = [
+            e.name for e in os.scandir(user_dir)
+            if e.name.lower().endswith(('.jpg', '.jpeg', '.png'))
+        ]
+    except PermissionError:
+        return None, []
+    if not names:
+        return None, []
+    # Sort by embedded timestamp (fast string sort on fixed-length ts)
+    names.sort()
+    return names[-1], names
+
 if getattr(sys, 'frozen', False):
     base_dir = os.path.dirname(sys.executable)   # config.json lives next to exe
     STATIC_DIR = os.path.join(sys._MEIPASS, 'static')  # static embedded in exe
@@ -172,7 +201,11 @@ def upload_image():
         
     save_path = os.path.join(target_dir, filename)
     file.save(save_path)
-    
+
+    # Invalidate caches so next Live View / Gallery fetch shows this new image
+    _latest_cache['ts']    = 0
+    _computers_cache['ts'] = 0
+
     return jsonify({"status": "success", "path": save_path})
 
 @app.route('/api/images', methods=['GET'])
@@ -231,20 +264,26 @@ def list_images():
         except:
             pass
 
-    all_files = []
+    # Collect (filename, full_path) tuples — sort by filename ts (no mtime syscall)
+    all_files = []  # list of (name, full_path)
     if os.path.exists(scan_base):
         for root, dirs, files in os.walk(scan_base):
             for file in files:
                 if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    all_files.append(os.path.join(root, file))
+                    all_files.append((file, os.path.join(root, file)))
 
-    all_files.sort(key=os.path.getmtime, reverse=True)
+    # Sort descending by filename (= timestamp in filename)
+    all_files.sort(key=lambda x: x[0], reverse=True)
     if max_scanned:
         all_files = all_files[:max_scanned]
 
     images = []
-    for full_path in all_files:
-        mtime = os.path.getmtime(full_path)
+    for fname, full_path in all_files:
+        # Use filename timestamp — fast, no syscall
+        mtime = _ts_from_filename(fname)
+        if mtime is None:
+            mtime = os.path.getmtime(full_path)  # fallback only
+
         if ts_from and mtime < ts_from:
             continue
         if ts_to and mtime > ts_to:
@@ -263,10 +302,10 @@ def list_images():
         username = parts[1] if len(parts) >= 3 else "unknown"
 
         images.append({
-            "filename": os.path.basename(full_path),
+            "filename": fname,
             "hostname": hostname,
             "username": username,
-            "size":     os.path.getsize(full_path),
+            "size":     0,        # skip getsize — saves 1 syscall per file
             "modified": mtime,
             "path":     rel_path.replace(os.sep, '/')
         })
@@ -335,7 +374,13 @@ def uninstall_client(key):
 
 @app.route('/api/computers', methods=['GET'])
 def get_computers():
-    """Return all hostname/username combos with their latest image — no limit"""
+    """Return all hostname/username combos with their latest image.
+    Result is cached for COMPUTERS_TTL seconds."""
+    global _computers_cache
+    now = time.time()
+    if _computers_cache['data'] is not None and now - _computers_cache['ts'] < COMPUTERS_TTL:
+        return jsonify(_computers_cache['data'])
+
     config = load_config()
     storage_path = config.get('storage_path', 'uploads')
     result = []
@@ -354,25 +399,21 @@ def get_computers():
                 user_dir = os.path.join(host_dir, username)
                 if not os.path.isdir(user_dir):
                     continue
-                try:
-                    images = sorted(
-                        e.name for e in os.scandir(user_dir)
-                        if e.name.lower().endswith(('.png', '.jpg', '.jpeg'))
-                    )
-                except Exception:
-                    images = []
-                total = len(images)
-                if images:
-                    latest_file = images[-1]
-                    latest_time = os.path.getmtime(os.path.join(user_dir, latest_file))
-                    result.append({
-                        'hostname': hostname,
-                        'username': username,
-                        'latest_url': f'/api/images/view/{hostname}/{username}/{latest_file}',
-                        'latest_time': latest_time,
-                        'total': total
-                    })
+                latest_file, all_names = _scan_user_dir(user_dir)
+                if not latest_file:
+                    continue
+                ts = _ts_from_filename(latest_file)
+                if ts is None:
+                    ts = os.path.getmtime(os.path.join(user_dir, latest_file))
+                result.append({
+                    'hostname': hostname,
+                    'username': username,
+                    'latest_url': f'/api/images/view/{hostname}/{username}/{latest_file}',
+                    'latest_time': ts,
+                    'total': len(all_names)
+                })
         result.sort(key=lambda x: x['latest_time'], reverse=True)
+        _computers_cache = {'data': result, 'ts': now}
     except Exception as e:
         print(f"[ERROR] /api/computers: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
@@ -380,12 +421,18 @@ def get_computers():
 
 @app.route('/api/latest', methods=['GET'])
 def get_latest():
-    """Return the most recent image for each hostname/username (for Live View)"""
+    """Return the most recent image for each hostname/username (for Live View).
+    Result is cached for LATEST_TTL seconds to avoid repeated full scans."""
+    global _latest_cache
+    now = time.time()
+    if _latest_cache['data'] is not None and now - _latest_cache['ts'] < LATEST_TTL:
+        return jsonify(_latest_cache['data'])
+
     try:
         config = load_config()
     except Exception as e:
-        print(f"[ERROR] get_latest load_config: {e}\n{traceback.format_exc()}")
         return jsonify({'error': 'load_config failed: ' + str(e)}), 500
+
     storage_path = config.get('storage_path', 'uploads')
     result = []
     try:
@@ -399,31 +446,26 @@ def get_latest():
             try:
                 usernames = os.listdir(host_dir)
             except PermissionError:
-                continue  # skip protected folders e.g. "System Volume Information"
+                continue
             for username in usernames:
                 user_dir = os.path.join(host_dir, username)
                 if not os.path.isdir(user_dir):
                     continue
-                try:
-                    images = sorted(
-                        e.name for e in os.scandir(user_dir)
-                        if e.name.lower().endswith(('.png', '.jpg', '.jpeg'))
-                    )
-                except Exception:
-                    images = []
-                if not images:
+                latest_file, _ = _scan_user_dir(user_dir)
+                if not latest_file:
                     continue
-                latest_file = images[-1]
-                mtime = os.path.getmtime(os.path.join(user_dir, latest_file))
-                # No cutoff — return latest image regardless of age
-                # Online/offline status is determined by heartbeat in /api/clients
+                # Use filename timestamp (no mtime syscall)
+                ts = _ts_from_filename(latest_file)
+                if ts is None:
+                    ts = os.path.getmtime(os.path.join(user_dir, latest_file))
                 result.append({
                     'hostname': hostname,
                     'username': username,
                     'url': f'/api/images/view/{hostname}/{username}/{latest_file}',
-                    'time': mtime
+                    'time': ts
                 })
         result.sort(key=lambda x: x['hostname'])
+        _latest_cache = {'data': result, 'ts': now}
     except Exception as e:
         print(f"[ERROR] /api/latest: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
